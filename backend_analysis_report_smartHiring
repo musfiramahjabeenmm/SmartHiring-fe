@@ -1,0 +1,201 @@
+# Smart Hiring Backend Analysis Report
+
+This report provides a detailed analysis of the **Smart Hiring** backend codebase. The application is built as a RESTful web service using **Java 21**, **Spring Boot 4.0.6**, **Spring Security**, **Spring Data JPA**, and **PostgreSQL** (hosted via Supabase), securing endpoints using stateless **JSON Web Tokens (JWT)**.
+
+---
+
+## 1. System Architecture & Tech Stack
+
+The application follows a standard layered architecture:
+```
+[Client (e.g., React App)]
+         │
+         ▼
+[Spring Security Filter Chain (JwtFilter)]
+         │
+         ▼
+[Controllers]  <-- Receives requests, maps DTOs
+         │
+         ▼
+[Services]     <-- Houses business logic
+         │
+         ▼
+[Repositories] <-- JpaRepository for DB interaction
+         │
+         ▼
+[Database (PostgreSQL / Supabase)]
+```
+
+### Key Technical Details
+- **Java version:** 21
+- **Spring Boot version:** 4.0.6
+- **Database:** PostgreSQL (Supabase)
+- **Security:** Stateless Spring Security, JWT (using JSON Web Token API `0.11.5`), BCrypt hashing for passwords.
+- **Boilerplate Reduction:** Lombok
+
+---
+
+## 2. Database Entity Relationship Diagram (ERD)
+
+The database schema is mapped by JPA entities with the following structure:
+
+```mermaid
+erDiagram
+    users {
+        Long id PK
+        String name
+        String email UK
+        String password
+        String role
+        LocalDateTime created_at
+    }
+    jobs {
+        Long id PK
+        String title
+        String description
+        String location
+        String salary_range
+        LocalDate opened_date
+        LocalDate closing_date
+        Long recruiter_id FK
+        LocalDateTime created_at
+    }
+    job_applications {
+        Long id PK
+        Long candidate_id FK
+        Long job_id FK
+        String resume_link
+        String status
+        LocalDateTime applied_at
+    }
+    users ||--o{ jobs : "posts (recruiter_id)"
+    users ||--o{ job_applications : "applies (candidate_id)"
+    jobs ||--o{ job_applications : "receives (job_id)"
+```
+
+### Table Mappings
+1. **`users`**: Stores user accounts. The `role` column holds either `RECRUITER` or `CANDIDATE`.
+2. **`jobs`**: Stores job postings. Linked to `users` via `recruiter_id`.
+3. **`job_applications`**: Maps candidates to job postings. Features a unique constraint `uniqueConstraints = @UniqueConstraint(columnNames = {"candidate_id", "job_id"})` ensuring a candidate cannot apply to the same job multiple times.
+
+---
+
+## 3. API Endpoints Reference
+
+The backend exposes the following REST API endpoints:
+
+### Authentication (`/api/auth`)
+| HTTP Method | Endpoint | Description | Access Level |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/auth/signup` | Register a new user (`SignupRequest`) | Public |
+| `POST` | `/api/auth/login` | Login and get JWT (`LoginRequest`) | Public |
+
+### Jobs (`/api/jobs`)
+| HTTP Method | Endpoint | Description | Access Level |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/jobs/post` | Post a new job posting (`JobRequest`) | Authenticated (Intended: Recruiter) |
+| `GET` | `/api/jobs/all` | Retrieve all job listings | Public |
+| `GET` | `/api/jobs/my` | Retrieve recruiter's posted jobs | Authenticated (Intended: Recruiter) |
+| `DELETE` | `/api/jobs/{id}` | Delete a job by ID | Authenticated Owner (Recruiter) |
+
+### Job Applications (`/api/applications`)
+| HTTP Method | Endpoint | Description | Access Level |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/applications/apply/{jobId}` | Apply to a job (`ApplicationRequest`) | Authenticated (Intended: Candidate) |
+| `GET` | `/api/applications/my` | View authenticated candidate's applications | Authenticated (Intended: Candidate) |
+| `GET` | `/api/applications/job/{jobId}` | View all applications for a job | Authenticated Owner (Recruiter) |
+| `PUT` | `/api/applications/{id}/status` | Update status (`StatusUpdateRequest`) | Authenticated Owner (Recruiter) |
+| `DELETE` | `/api/applications/{id}/withdraw` | Withdraw/delete job application | Authenticated Owner (Candidate) |
+| `GET` | `/api/applications/dashboard/candidate` | Statistics map for candidate dashboard | Authenticated (Intended: Candidate) |
+
+---
+
+## 4. Key Security & Quality Findings
+
+> [!WARNING]
+> ### 1. Missing Role-Based Authorization Checks
+> Although the system supports roles (`RECRUITER` and `CANDIDATE`) and stores them in the JWT token (as a claim and as authorities prefixed with `ROLE_`), **role authorization is never enforced on endpoints**. 
+> - A user registered as a `CANDIDATE` can successfully hit `POST /api/jobs/post` to create a job.
+> - A user registered as a `RECRUITER` can successfully hit `POST /api/applications/apply/{jobId}` to apply to a job.
+> - **Impact:** High security vulnerability allowing users to perform actions outside their designated organizational role.
+
+> [!CAUTION]
+> ### 2. Plaintext Secrets & Hardcoded Connection Credentials
+> Sensitive configurations are exposed in [application.properties](file:///c:/projects/smart-hiring/src/main/resources/application.properties):
+> - The PostgreSQL datasource URL contains connection credentials, hostnames, and passwords in plaintext.
+> - The JWT signing secret is hardcoded as `mySecretKey123456789012345678901234567890`.
+> - **Impact:** Severe credential exposure if this code is committed to a public repository.
+
+> [!WARNING]
+> ### 3. CORS Configuration Conflict
+> - [SecurityConfig.java](file:///c:/projects/smart-hiring/src/main/java/com/hire/smart/hiring/security/SecurityConfig.java) specifies precise allowed origins (`http://localhost:5173`, `http://localhost:5174`) and allows credentials (`config.setAllowCredentials(true)`).
+> - However, the controller classes ([AuthController](file:///c:/projects/smart-hiring/src/main/java/com/hire/smart/hiring/controller/AuthController.java), [JobController](file:///c:/projects/smart-hiring/src/main/java/com/hire/smart/hiring/controller/JobController.java), [ApplicationController](file:///c:/projects/smart-hiring/src/main/java/com/hire/smart/hiring/controller/ApplicationController.java)) carry `@CrossOrigin(origins = "*")`.
+> - **Impact:** Modern browsers block requests containing credentials (e.g. `Authorization` headers) when the server specifies `Access-Control-Allow-Origin: *`. The controller level `@CrossOrigin` overrides or conflicts with Spring Security's config and may cause CORS errors on the frontend.
+
+> [!NOTE]
+> ### 4. Generic Exceptions & Lack of Global Error Handler
+> Service classes throw generic `RuntimeException` (e.g., `throw new RuntimeException("Email already registered!");`).
+> - **Impact:** In Spring Boot, uncaught `RuntimeException`s yield a generic HTTP 500 error response status. Standard errors like "Already applied to this job" should return a HTTP 400 Bad Request, and unauthorized operations (like deleting a job owned by someone else) should return HTTP 403 Forbidden.
+
+---
+
+## 5. Architectural Improvements
+
+To secure the backend and resolve the findings, the following refactoring steps are highly recommended:
+
+### Step A: Secure Endpoints by Role
+Update [SecurityConfig.java](file:///c:/projects/smart-hiring/src/main/java/com/hire/smart/hiring/security/SecurityConfig.java) to enforce role-based access:
+
+```java
+.authorizeHttpRequests(auth -> auth
+    .requestMatchers("/api/auth/**").permitAll()
+    .requestMatchers(HttpMethod.GET, "/api/jobs/all").permitAll()
+    // Recruiter-only endpoints
+    .requestMatchers(HttpMethod.POST, "/api/jobs/post").hasRole("RECRUITER")
+    .requestMatchers(HttpMethod.GET, "/api/jobs/my").hasRole("RECRUITER")
+    .requestMatchers("/api/applications/job/**").hasRole("RECRUITER")
+    .requestMatchers(HttpMethod.PUT, "/api/applications/*/status").hasRole("RECRUITER")
+    // Candidate-only endpoints
+    .requestMatchers(HttpMethod.POST, "/api/applications/apply/**").hasRole("CANDIDATE")
+    .requestMatchers(HttpMethod.GET, "/api/applications/my").hasRole("CANDIDATE")
+    .requestMatchers(HttpMethod.DELETE, "/api/applications/*/withdraw").hasRole("CANDIDATE")
+    .requestMatchers("/api/applications/dashboard/candidate").hasRole("CANDIDATE")
+    .anyRequest().authenticated()
+)
+```
+
+Alternatively, enable method-level security by adding `@EnableMethodSecurity` to `SecurityConfig.java` and annotating service or controller methods:
+```java
+@PreAuthorize("hasRole('RECRUITER')")
+```
+
+### Step B: Unify CORS Settings
+Remove the `@CrossOrigin(origins = "*")` annotation from controllers and let Spring Security's cors bean handle origin configurations cleanly.
+
+### Step C: Environment Variables for Secrets
+Modify [application.properties](file:///c:/projects/smart-hiring/src/main/resources/application.properties) to extract secrets:
+```properties
+spring.datasource.url=${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres}
+spring.datasource.username=${SPRING_DATASOURCE_USERNAME:postgres}
+spring.datasource.password=${SPRING_DATASOURCE_PASSWORD:password}
+jwt.secret=${JWT_SECRET:defaultSecretKeyNeedToChangeThisInProd1234567890}
+```
+
+### Step D: Implement Global Exception Handling
+Create a custom error handling class using `@RestControllerAdvice`:
+```java
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(value = { IllegalArgumentException.class, IllegalStateException.class })
+    public ResponseEntity<Map<String, String>> handleBadRequest(RuntimeException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", ex.getMessage()));
+    }
+
+    @ExceptionHandler(value = { SecurityException.class })
+    public ResponseEntity<Map<String, String>> handleUnauthorized(RuntimeException ex) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", ex.getMessage()));
+    }
+}
+```
+Update service classes to throw specific exceptions (e.g. `IllegalArgumentException` for validation, custom exceptions for business rules) rather than generic `RuntimeException`.
